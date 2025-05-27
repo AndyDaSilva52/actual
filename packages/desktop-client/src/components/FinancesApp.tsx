@@ -28,6 +28,7 @@ import { ManagePayeesPage } from './payees/ManagePayeesPage';
 import { Reports } from './reports';
 import { LoadingIndicator } from './reports/LoadingIndicator';
 import { NarrowAlternate, WideComponent } from './responsive';
+import DebtPage from './debt/DebtPage'; // Import DebtPage
 import { UserDirectoryPage } from './responsive/wide';
 import { ScrollProvider } from './ScrollProvider';
 import { useMultiuserEnabled } from './ServerContext';
@@ -258,6 +259,8 @@ export function FinancesApp() {
                 <Route path="/rules" element={<ManageRulesPage />} />
                 <Route path="/bank-sync" element={<BankSync />} />
                 <Route path="/settings" element={<Settings />} />
+
+                <Route path="/debt" element={<DebtPage />} />
 
                 <Route
                   path="/gocardless/link"

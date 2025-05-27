@@ -15,7 +15,7 @@ import * as fs from '../../platform/server/fs';
 import * as sqlite from '../../platform/server/sqlite';
 import * as monthUtils from '../../shared/months';
 import { groupById } from '../../shared/util';
-import { TransactionEntity } from '../../types/models';
+import { TransactionEntity, DebtEntity, TransactionDebtLinkEntity } from '../../types/models'; // Added TransactionDebtLinkEntity
 import { WithRequired } from '../../types/util';
 import {
   schema,
@@ -30,6 +30,8 @@ import {
   categoryModel,
   categoryGroupModel,
   payeeModel,
+  debtModel,
+  transactionDebtLinkModel, // Added transactionDebtLinkModel
 } from '../models';
 import { sendMessages, batchMessages } from '../sync';
 
@@ -46,6 +48,8 @@ import {
   DbTransaction,
   DbViewTransaction,
   DbViewTransactionInternalAlive,
+  DbDebt,
+  DbTransactionDebtLink, // Added DbTransactionDebtLink
 } from './types';
 
 export * from './types';
@@ -802,4 +806,129 @@ export async function deleteTransaction(transaction) {
 
 function toSqlQueryParameters(params: unknown[]) {
   return params.map(() => '?').join(',');
+}
+
+// Debt Functions
+export async function insertDebt(
+  debt: Partial<DebtEntity>,
+): Promise<DebtEntity['id']> {
+  const dbDebtInput = debtModel.toDb(debt); // Converts DebtEntity to DbDebt structure
+  // debtModel.validate expects Partial<DbDebt>
+  const validatedDbDebt = debtModel.validate(dbDebtInput as Partial<DbDebt>);
+  return insertWithSchema('debts', validatedDbDebt);
+}
+
+export async function getDebt(
+  id: DbDebt['id'],
+): Promise<DebtEntity | null> {
+  const row = await selectFirstWithSchema<DbDebt>(
+    'debts',
+    'SELECT * FROM debts WHERE id = ? AND tombstone = 0',
+    [id],
+  );
+  return row ? debtModel.fromDb(row) : null;
+}
+
+export async function getDebts(): Promise<DebtEntity[]> {
+  const rows = await selectWithSchema<DbDebt>(
+    'debts',
+    'SELECT * FROM debts WHERE tombstone = 0 ORDER BY creditor_name, debt_nickname',
+    [],
+  );
+  return rows.map(r => debtModel.fromDb(r));
+}
+
+export async function updateDebt(
+  debt: Partial<DebtEntity> & { id: DbDebt['id'] },
+): Promise<void> {
+  if (!debt.id) { // Basic check, though type system should enforce it
+    throw new Error('updateDebt: id is required');
+  }
+  const dbDebtInput = debtModel.toDb(debt); // Converts DebtEntity to DbDebt structure
+  // debtModel.validate expects Partial<DbDebt> & { id: string } for updates
+  const validatedDbDebt = debtModel.validate(
+    dbDebtInput as Partial<DbDebt> & { id: DbDebt['id'] },
+    { update: true },
+  );
+  return updateWithSchema('debts', validatedDbDebt);
+}
+
+export async function deleteDebt(id: DbDebt['id']): Promise<void> {
+  return delete_('debts', id);
+}
+
+// TransactionDebtLink Functions
+export async function insertTransactionDebtLink(
+  link: Partial<TransactionDebtLinkEntity>,
+): Promise<TransactionDebtLinkEntity['id']> {
+  const dbLinkInput = transactionDebtLinkModel.toDb(link);
+  const validatedDbLink = transactionDebtLinkModel.validate(
+    dbLinkInput as Partial<DbTransactionDebtLink>,
+  );
+  // Ensure amount_applied is explicitly null if undefined, as SQL schema has REAL (nullable)
+  // The `toDb` method in transactionDebtLinkModel should handle the conversion of
+  // `undefined` amount_applied to whatever the DB expects (likely null for insert)
+  // or rely on AQL `convertForInsert` behavior. Explicitly setting to null if undefined for clarity.
+  if (validatedDbLink.amount_applied === undefined) {
+    validatedDbLink.amount_applied = null;
+  }
+  return insertWithSchema('transaction_debt_links', validatedDbLink);
+}
+
+export async function getTransactionDebtLink(
+  id: TransactionDebtLinkEntity['id'],
+): Promise<TransactionDebtLinkEntity | null> {
+  const row = await selectFirstWithSchema<DbTransactionDebtLink>(
+    'transaction_debt_links',
+    'SELECT * FROM transaction_debt_links WHERE id = ? AND tombstone = 0',
+    [id],
+  );
+  return row ? transactionDebtLinkModel.fromDb(row) : null;
+}
+
+export async function getDebtLinksForTransaction(
+  transactionId: string,
+): Promise<TransactionDebtLinkEntity[]> {
+  const rows = await selectWithSchema<DbTransactionDebtLink>(
+    'transaction_debt_links',
+    'SELECT * FROM transaction_debt_links WHERE transaction_id = ? AND tombstone = 0',
+    [transactionId],
+  );
+  return rows.map(r => transactionDebtLinkModel.fromDb(r));
+}
+
+export async function getDebtLinksForDebt(
+  debtId: string,
+): Promise<TransactionDebtLinkEntity[]> {
+  const rows = await selectWithSchema<DbTransactionDebtLink>(
+    'transaction_debt_links',
+    'SELECT * FROM transaction_debt_links WHERE debt_id = ? AND tombstone = 0',
+    [debtId],
+  );
+  return rows.map(r => transactionDebtLinkModel.fromDb(r));
+}
+
+export async function updateTransactionDebtLink(
+  link: Partial<TransactionDebtLinkEntity> & { id: TransactionDebtLinkEntity['id'] },
+): Promise<void> {
+  if (!link.id) {
+    throw new Error('updateTransactionDebtLink: id is required');
+  }
+  const dbLinkInput = transactionDebtLinkModel.toDb(link);
+  // Handle case where amount_applied might be explicitly set to null via undefined in Partial
+  if ('amount_applied' in link && link.amount_applied === undefined) {
+    (dbLinkInput as Partial<DbTransactionDebtLink>).amount_applied = null;
+  }
+
+  const validatedDbLink = transactionDebtLinkModel.validate(
+    dbLinkInput as Partial<DbTransactionDebtLink> & { id: DbTransactionDebtLink['id'] },
+    { update: true },
+  );
+  return updateWithSchema('transaction_debt_links', validatedDbLink);
+}
+
+export async function deleteTransactionDebtLink(
+  id: TransactionDebtLinkEntity['id'],
+): Promise<void> {
+  return delete_('transaction_debt_links', id); // Soft delete by setting tombstone = 1
 }

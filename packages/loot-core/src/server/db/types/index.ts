@@ -31,6 +31,37 @@ export type DbBank = {
   tombstone: 1 | 0;
 };
 
+export type DbDebt = {
+  id: string;
+  creditor_name: string;
+  debt_nickname?: string | null;
+  account_number?: string | null; // Stored encrypted
+  debt_type: string; // ENUM-like: 'CREDIT_CARD', 'MORTGAGE', etc.
+  current_balance: number; // REAL
+  original_balance?: number | null; // REAL
+  interest_rate_apr: number; // REAL
+  minimum_monthly_payment: number; // REAL
+  next_payment_due_date?: string | null; // TEXT 'YYYY-MM-DD'
+  original_loan_term_months?: number | null; // INTEGER
+  compounding_frequency?: string; // TEXT ENUM-like: 'DAILY', 'MONTHLY', 'ANNUALLY'
+  late_payment_fee?: number | null; // REAL
+  other_fees?: string | null; // JSON TEXT: '[{"name": "Annual Fee", "amount": 75, "frequency": "ANNUAL"}]'
+  creation_date?: string | null; // TEXT ISO8601
+  last_updated_date?: string | null; // TEXT ISO8601
+  custom_order?: number | null; // INTEGER
+  promotional_apr_rate?: number | null; // REAL
+  promotional_apr_expires_date?: string | null; // TEXT 'YYYY-MM-DD'
+  tombstone: 0 | 1;
+};
+
+export type DbTransactionDebtLink = {
+  id: string;
+  transaction_id: string;
+  debt_id: string;
+  amount_applied: number | null;
+  tombstone: 0 | 1;
+};
+
 export type DbCategory = {
   id: string;
   name: string;
