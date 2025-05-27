@@ -13,6 +13,9 @@ type OFXTransaction = {
 };
 
 type OFXParseResult = {
+  accountNumber?: string; // The extracted ACCTID
+  bankId?: string; // The extracted BANKID (if available)
+  accountType?: string; // The extracted account type (if available)
   headers: Record<string, unknown>;
   transactions: OFXTransaction[];
 };
@@ -150,8 +153,61 @@ export async function ofx2json(ofx: string): Promise<OFXParseResult> {
     dataParsed = await parseXml(sanitized);
   }
 
+  let accountNumber: string | undefined;
+  let bankId: string | undefined;
+  let accountType: string | undefined;
+
+  try {
+    const ofxRoot = dataParsed?.OFX;
+    if (ofxRoot) {
+      // Check for bank account details
+      const bankAcctFrom =
+        ofxRoot.BANKMSGSRSV1?.STMTTRNRS?.STMTRS?.BANKACCTFROM ||
+        ofxRoot.SIGNONMSGSRSV1?.SONRS?.FI?.BANKACCTFROM; // Some banks like fidelity put it in SIGNONMSGSRSV1
+      if (bankAcctFrom) {
+        accountNumber = bankAcctFrom.ACCTID;
+        bankId = bankAcctFrom.BANKID; // Routing number
+        accountType = bankAcctFrom.ACCTTYPE;
+      }
+
+      // Check for credit card account details (overrides bank if both somehow exist)
+      const ccAcctFrom =
+        ofxRoot.CREDITCARDMSGSRSV1?.CCSTMTTRNRS?.CCSTMTRS?.CCACCTFROM;
+      if (ccAcctFrom) {
+        accountNumber = ccAcctFrom.ACCTID;
+        accountType = 'CREDITCARD'; // OFX spec often implies this, ACCTTYPE might not be present
+      }
+      
+      // Fallback for investment accounts if accountType is still unknown
+      // INVSTMTRS may contain account information directly or within INVACCTFROM
+      if (!accountNumber) {
+        const invAcctFrom = ofxRoot.INVSTMTMSGSRSV1?.INVSTMTTRNRS?.INVSTMTRS?.INVACCTFROM;
+        if (invAcctFrom) {
+            accountNumber = invAcctFrom.ACCTID;
+        } else {
+            // Sometimes ACCTID is directly under INVSTMTRS for some brokers
+            const invStmrtRs = ofxRoot.INVSTMTMSGSRSV1?.INVSTMTTRNRS?.INVSTMTRS;
+            if (invStmrtRs?.ACCTID) {
+                accountNumber = invStmrtRs.ACCTID;
+            }
+        }
+        // Investment accounts don't have a standard ACCTTYPE like bank/creditcard
+        // but we can mark it if found within investment messages
+        if (accountNumber && !accountType && ofxRoot.INVSTMTMSGSRSV1) {
+            accountType = 'INVESTMENT';
+        }
+      }
+    }
+  } catch (e) {
+    console.error('Error extracting account information from OFX:', e);
+    // Keep going, accountNumber, bankId, accountType will be undefined
+  }
+
   return {
     headers,
     transactions: getStmtTrn(dataParsed).map(mapOfxTransaction),
+    accountNumber,
+    bankId,
+    accountType,
   };
 }

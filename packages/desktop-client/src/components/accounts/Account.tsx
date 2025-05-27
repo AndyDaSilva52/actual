@@ -588,38 +588,40 @@ class AccountInternal extends PureComponent<
   };
 
   onImport = async () => {
-    const accountId = this.props.accountId;
-    const account = this.props.accounts.find(acct => acct.id === accountId);
+    const accountId = this.props.accountId; // This could be a string ID, or null/undefined for 'All Accounts'
+    const account = this.props.accounts.find(acct => acct.id === accountId); // This will be undefined if accountId is null/undefined
 
-    if (account) {
+    // Allow import if it's a valid single account OR if accountId signifies 'All Accounts' (e.g., null/undefined)
+    if (account || accountId == null) {
       const res = await window.Actual.openFileDialog({
         filters: [
           {
-            name: t('Financial files'),
+            name: t('Financial files'), // Make sure t is available or import useTranslation if needed
             extensions: ['qif', 'ofx', 'qfx', 'csv', 'tsv', 'xml'],
           },
         ],
       });
 
-      if (res) {
-        if (accountId && res?.length > 0) {
-          this.props.dispatch(
-            pushModal({
-              modal: {
-                name: 'import-transactions',
-                options: {
-                  accountId,
-                  filename: res[0],
-                  onImported: (didChange: boolean) => {
-                    if (didChange) {
-                      this.fetchTransactions();
-                    }
-                  },
+      if (res && res.length > 0) {
+        // For 'All Accounts', accountId will be null/undefined.
+        // For single account import, accountId will be the specific ID.
+        // ImportTransactionsModal is already prepared to handle accountId being null.
+        this.props.dispatch(
+          pushModal({
+            modal: {
+              name: 'import-transactions',
+              options: {
+                accountId: this.props.accountId, // Pass the original accountId (which might be null)
+                filename: res[0],
+                onImported: (didChange: boolean) => {
+                  if (didChange) {
+                    this.fetchTransactions(); // This should ideally refetch for all accounts if accountId was null
+                  }
                 },
               },
-            }),
-          );
-        }
+            },
+          }),
+        );
       }
     }
   };

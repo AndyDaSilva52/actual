@@ -35,6 +35,7 @@ import { undoable, withUndo } from '../undo';
 import * as link from './link';
 import { getStartingBalancePayee } from './payees';
 import * as bankSync from './sync';
+import { findOrCreateAccountByDetails } from './account-utils';
 
 export type AccountHandlers = {
   'account-update': typeof updateAccount;
@@ -1086,44 +1087,196 @@ async function importTransactions({
   isPreview,
   opts,
 }: {
-  accountId: AccountEntity['id'];
+  accountId: AccountEntity['id'] | null | undefined; // Allow null or undefined
   transactions: TransactionEntity[];
   isPreview: boolean;
   opts?: {
     defaultCleared: boolean;
   };
 }): Promise<ImportTransactionsResult> {
-  if (typeof accountId !== 'string') {
-    throw APIError('transactions-import: accountId must be an id');
+  // Allow accountId to be null or undefined for 'All Accounts' import
+  if (typeof accountId !== 'string' && accountId != null) {
+    throw APIError(
+      'transactions-import: accountId must be an id or null/undefined for all accounts',
+    );
   }
 
-  try {
-    const reconciled = await bankSync.reconcileTransactions(
-      accountId,
-      transactions,
-      false,
-      true,
-      isPreview,
-      opts?.defaultCleared,
+  const aggregatedResult: ImportTransactionsResult = {
+    errors: [],
+    added: [],
+    updated: [],
+    updatedPreview: [],
+  };
+  const transactionsInputArray = Array.isArray(transactions) ? transactions : [transactions];
+
+
+  if (typeof accountId === 'string') {
+    // Single account import (existing logic)
+    try {
+      const reconciled = await bankSync.reconcileTransactions(
+        accountId,
+        transactionsInputArray,
+        false, // isBankSyncAccount - assuming false for manual imports
+        true, // strictIdChecking
+        isPreview,
+        opts?.defaultCleared,
+      );
+      aggregatedResult.added.push(...reconciled.added);
+      aggregatedResult.updated.push(...reconciled.updated);
+      if (reconciled.updatedPreview) {
+        aggregatedResult.updatedPreview.push(...reconciled.updatedPreview);
+      }
+    } catch (err) {
+      if (err instanceof TransactionError) {
+        aggregatedResult.errors.push({ message: err.message });
+      } else {
+        // For unexpected errors, rethrow or handle as a general error
+        captureException(err);
+        aggregatedResult.errors.push({
+          message:
+            t('An unexpected error occurred during import: ') +
+            (err instanceof Error ? err.message : String(err)),
+        });
+      }
+    }
+  } else {
+    // 'All Accounts' import
+    const transactionsByAccount = new Map<string, TransactionEntity[]>();
+    const skippedTransactions: TransactionEntity[] = [];
+    const allAccountsArray = await db.getAccounts(); // Used for passing to findOrCreate
+    const allAccountsMap = new Map( // Used for quick lookups by ID
+      allAccountsArray.map(acc => [acc.id, acc]),
     );
-    return {
-      errors: [],
-      added: reconciled.added,
-      updated: reconciled.updated,
-      updatedPreview: reconciled.updatedPreview,
-    };
-  } catch (err) {
-    if (err instanceof TransactionError) {
-      return {
-        errors: [{ message: err.message }],
-        added: [],
-        updated: [],
-        updatedPreview: [],
-      };
+
+    for (const transaction of transactionsInputArray) {
+      let determinedAccountId = transaction.account as string | undefined;
+
+      // Attempt to determine account if not set or invalid
+      if (!determinedAccountId || !allAccountsMap.has(determinedAccountId)) {
+        if (transaction.extractedAccountNumber) {
+          const newOrFoundAccountId = await findOrCreateAccountByDetails(
+            transaction.extractedAccountNumber,
+            transaction.extractedBankId,
+            transaction.extractedAccountType,
+            allAccountsArray, // Pass the live array
+          );
+
+          if (newOrFoundAccountId) {
+            determinedAccountId = newOrFoundAccountId;
+            transaction.account = newOrFoundAccountId; // Assign back for grouping
+
+            // If a new account was created, add it to our working lists
+            if (!allAccountsMap.has(newOrFoundAccountId)) {
+              const newAccount = await db.getAccount(newOrFoundAccountId);
+              if (newAccount) {
+                allAccountsArray.push(newAccount); // Keep array in sync
+                allAccountsMap.set(newOrFoundAccountId, newAccount);
+                 console.log(`importTransactions: Added new account ${newAccount.name} (ID: ${newOrFoundAccountId}) to working list.`);
+              } else {
+                // This case should be rare if createAccount was successful and returned an ID
+                console.error(`importTransactions: Failed to fetch newly created account ${newOrFoundAccountId}.`);
+              }
+            }
+          } else {
+            console.warn(
+              `Skipping transaction in importTransactions as account could not be determined/created for accNumber: ${transaction.extractedAccountNumber}`,
+               transaction.id || transaction.description || transaction.payee_name,
+            );
+            skippedTransactions.push(transaction);
+            continue; 
+          }
+        } else {
+          console.warn(
+            'Skipping transaction in importTransactions as account is not set and no extracted number found.',
+             transaction.id || transaction.description || transaction.payee_name,
+          );
+          skippedTransactions.push(transaction);
+          continue;
+        }
+      }
+      
+      // Ensure determinedAccountId is valid before proceeding to group
+      if (typeof determinedAccountId === 'string' && determinedAccountId) {
+        if (!transactionsByAccount.has(determinedAccountId)) {
+          transactionsByAccount.set(determinedAccountId, []);
+        }
+        transactionsByAccount.get(determinedAccountId)?.push(transaction);
+      } else {
+         // This case should ideally be caught by the logic above,
+         // but as a fallback, skip if determinedAccountId is still not valid.
+        console.warn(
+          'Skipping transaction due to invalid or undetermined account ID after find/create attempt:',
+           transaction.id || transaction.description || transaction.payee_name,
+        );
+        skippedTransactions.push(transaction);
+      }
+    }
+    
+    if (skippedTransactions.length > 0) {
+      aggregatedResult.errors.push({
+        message: t(
+          '{{count}} transaction(s) were skipped because their account could not be determined or created.',
+          { count: skippedTransactions.length },
+        ),
+      });
     }
 
-    throw err;
+    if (transactionsByAccount.size === 0 && transactionsInputArray.length > 0) {
+      // Check if all transactions were skipped. If so, the skippedTransactions error message is sufficient.
+      // Otherwise, if some transactions were not skippable but still didn't form groups, add a generic error.
+      if (skippedTransactions.length !== transactionsInputArray.length) {
+         aggregatedResult.errors.push({
+            message: t(
+              'No transactions could be assigned to an account. Please ensure transactions have an account specified or import to a single account.',
+            ),
+          });
+      }
+      // Only return if ALL transactions effectively led to zero groups for processing.
+      if (transactionsByAccount.size === 0) return aggregatedResult;
+    }
+    // The rest of the 'All Accounts' logic (looping through transactionsByAccount and calling reconcileTransactions) remains the same.
+    // This ensures that the previously implemented logic for processing grouped transactions is still executed.
+    for (const [
+      currentAccountId,
+      accountTransactions,
+    ] of transactionsByAccount.entries()) {
+      try {
+        console.log(
+          `Reconciling ${accountTransactions.length} transactions for account ${currentAccountId}`,
+        );
+        const reconciled = await bankSync.reconcileTransactions(
+          currentAccountId,
+          accountTransactions,
+          false, // isBankSyncAccount
+          true, // strictIdChecking
+          isPreview,
+          opts?.defaultCleared,
+        );
+        aggregatedResult.added.push(...reconciled.added);
+        aggregatedResult.updated.push(...reconciled.updated);
+        if (reconciled.updatedPreview) {
+          aggregatedResult.updatedPreview.push(...reconciled.updatedPreview);
+        }
+      } catch (err) {
+        if (err instanceof TransactionError) {
+          aggregatedResult.errors.push({
+            message: `Error importing to account ${currentAccountId}: ${err.message}`,
+          });
+        } else {
+          captureException(err);
+          aggregatedResult.errors.push({
+            message:
+              t(
+                'An unexpected error occurred while importing to account {{accountIdParam}}: ',
+                { accountIdParam: currentAccountId },
+              ) + (err instanceof Error ? err.message : String(err)),
+          });
+        }
+      }
+    }
   }
+
+  return aggregatedResult;
 }
 
 async function unlinkAccount({ id }: { id: AccountEntity['id'] }) {

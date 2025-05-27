@@ -10,11 +10,20 @@ import { aqlQuery } from '../aql';
 import { mutator } from '../mutators';
 import { undoable } from '../undo';
 
+import * as db from '../db';
 import { exportQueryToCSV, exportToCSV } from './export/export-to-csv';
 import { parseFile, ParseFileOptions } from './import/parse-file';
 import { mergeTransactions } from './merge';
 
 import { batchUpdateTransactions } from '.';
+
+type FindPotentialAccountsArgs = {
+  payeeName?: string;
+  importedPayee?: string;
+  extractedAccountNumber?: string;
+  // amount?: number; // Not used in this version, but could be for future heuristics
+  // date?: string;   // Not used in this version
+};
 
 export type TransactionHandlers = {
   'transactions-batch-update': typeof handleBatchUpdateTransactions;
@@ -26,7 +35,56 @@ export type TransactionHandlers = {
   'transactions-export-query': typeof exportTransactionsQuery;
   'transactions-merge': typeof mergeTransactions;
   'get-earliest-transaction': typeof getEarliestTransaction;
+  'transactions-find-potential-accounts': typeof findPotentialAccountsForTransaction;
 };
+
+async function findPotentialAccountsForTransaction(
+  args: FindPotentialAccountsArgs,
+): Promise<{ potentialAccountIds: string[] }> {
+  const allAccounts = await db.getAccounts({ closed: false });
+  const potentialAccountIds = new Set<string>();
+
+  // Primary Matching - Extracted Account Number
+  if (args.extractedAccountNumber && args.extractedAccountNumber.trim() !== '') {
+    for (const acc of allAccounts) {
+      if (acc.account_id === args.extractedAccountNumber) {
+        potentialAccountIds.add(acc.id);
+      }
+    }
+  }
+
+  // Secondary Matching - Payee's Last Used Account (if no primary match)
+  if (potentialAccountIds.size === 0 && args.payeeName) {
+    const payee = await db.getPayeeByName(args.payeeName);
+    if (payee && payee.transfer_acct == null) {
+      const lastTransaction = await db.first<{ account: string }>(
+        'SELECT account FROM transactions WHERE payee = ? AND account IS NOT NULL ORDER BY date DESC, id DESC LIMIT 1',
+        [payee.id],
+      );
+      if (lastTransaction && lastTransaction.account) {
+        potentialAccountIds.add(lastTransaction.account);
+      }
+    }
+  }
+  
+  // Optional: Tertiary Matching - Imported Payee's Last Used Account (if still no matches)
+  // This could be useful if the `payeeName` was a renamed payee and `importedPayee` holds the original.
+  if (potentialAccountIds.size === 0 && args.importedPayee && args.importedPayee !== args.payeeName) {
+    const importedPayeeEntity = await db.getPayeeByName(args.importedPayee);
+    if (importedPayeeEntity && importedPayeeEntity.transfer_acct == null) {
+      const lastTransactionForImportedPayee = await db.first<{ account: string }>(
+        'SELECT account FROM transactions WHERE payee = ? AND account IS NOT NULL ORDER BY date DESC, id DESC LIMIT 1',
+        [importedPayeeEntity.id],
+      );
+      if (lastTransactionForImportedPayee && lastTransactionForImportedPayee.account) {
+        potentialAccountIds.add(lastTransactionForImportedPayee.account);
+      }
+    }
+  }
+
+  return { potentialAccountIds: Array.from(potentialAccountIds) };
+}
+
 
 async function handleBatchUpdateTransactions({
   added,
@@ -117,3 +175,4 @@ app.method('transactions-parse-file', mutator(parseTransactionsFile));
 app.method('transactions-export', mutator(exportTransactions));
 app.method('transactions-export-query', mutator(exportTransactionsQuery));
 app.method('get-earliest-transaction', getEarliestTransaction);
+app.method('transactions-find-potential-accounts', findPotentialAccountsForTransaction);

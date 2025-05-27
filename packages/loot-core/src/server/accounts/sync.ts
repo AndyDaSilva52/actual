@@ -33,8 +33,77 @@ import {
   mappingsFromString,
 } from '../util/custom-sync-mapping';
 
+import { app as mainApp } from '../main-app';
 import { getStartingBalancePayee } from './payees';
 import { title } from './title';
+import { findOrCreateAccountByDetails } from './account-utils';
+
+async function findOrCreateAccountByDetails(
+  extractedAccountNumber: string,
+  extractedBankId: string | null | undefined, // Not used in current creation logic but available
+  extractedAccountType: string | null | undefined,
+  allAccounts: AccountEntity[], // Current list of all accounts
+): Promise<string | null> {
+  if (!extractedAccountNumber || typeof extractedAccountNumber !== 'string') {
+    return null;
+  }
+
+  // Search Existing Accounts
+  for (const acc of allAccounts) {
+    // Prioritize matching on `account_id` which might store the same number
+    // or a provider-specific ID if the account is already linked.
+    if (acc.account_id === extractedAccountNumber) {
+      return acc.id;
+    }
+    // Add other potential fields to check, e.g., a dedicated 'bank_sync_account_number'
+    // if (acc.bank_sync_account_number === extractedAccountNumber) {
+    //   return acc.id;
+    // }
+  }
+
+  // Create New Account (if no match)
+  const last4 = extractedAccountNumber.slice(-4);
+  let name;
+  let offBudget = false; // Default to on-budget
+
+  switch (String(extractedAccountType).toUpperCase()) {
+    case 'CREDITCARD':
+      name = `Credit Card ending in ${last4}`;
+      // Credit cards are typically on-budget accounts
+      offBudget = false;
+      break;
+    case 'CHECKING':
+      name = `Checking ...${last4}`;
+      break;
+    case 'SAVINGS':
+      name = `Savings ...${last4}`;
+      break;
+    default:
+      name = `Account ...${last4}`;
+      if (extractedAccountType) {
+        name = `${title(extractedAccountType)} ...${last4}`;
+      }
+  }
+
+  try {
+    const newAccountId = await mainApp.handlers['account-create']({
+      name,
+      balance: 0, // Initial balance, transactions will adjust this
+      offBudget,
+      // Potentially add 'account_id: extractedAccountNumber' here if `createAccount` supports it
+      // and if we want the new account's `account_id` to be the extracted number directly.
+      // Also, consider setting a field like `bank_sync_account_number: extractedAccountNumber`
+    });
+
+    // Add the new account to our working list to prevent duplicates in the same run
+    // This part is tricky as this function doesn't own `allAccounts`.
+    // The caller will need to manage updating its list.
+    return newAccountId;
+  } catch (error) {
+    console.error('Failed to create account using findOrCreateAccountByDetails:', error);
+    return null;
+  }
+}
 
 function BankSyncError(type: string, code: string, details?: object) {
   return { type: 'BankSyncError', category: type, code, details };
@@ -810,62 +879,156 @@ export async function matchTransactions(
 // This is similar to `reconcileTransactions` except much simpler: it
 // does not try to match any transactions. It just adds them
 export async function addTransactions(
-  acctId,
-  transactions,
+  acctId: string | null | undefined,
+  transactions: TransactionEntity[],
   { runTransfers = true, learnCategories = false } = {},
 ) {
-  const added = [];
-
-  const { normalized, payeesToCreate } = await normalizeTransactions(
-    transactions,
-    acctId,
-    { rawPayeeName: true },
-  );
-
+  let allAddedTransactions = [];
+  const allPayeesToCreate = new Map();
   const accounts: db.DbAccount[] = await db.getAccounts();
   const accountsMap = new Map(accounts.map(account => [account.id, account]));
 
-  for (const { trans: originalTrans, subtransactions } of normalized) {
-    // Run the rules
-    const trans = await runRules(originalTrans, accountsMap);
+  if (typeof acctId === 'string') {
+    // Single account import
+    const { normalized, payeesToCreate } = await normalizeTransactions(
+      transactions,
+      acctId,
+      { rawPayeeName: true },
+    );
+    allPayeesToCreate = payeesToCreate;
 
-    const finalTransaction = {
-      id: uuidv4(),
-      ...trans,
-      account: acctId,
-      cleared: trans.cleared != null ? trans.cleared : true,
-    };
+    for (const { trans: originalTrans, subtransactions } of normalized) {
+      const trans = await runRules(originalTrans, accountsMap);
+      const finalTransaction = {
+        id: uuidv4(),
+        ...trans,
+        account: acctId,
+        cleared: trans.cleared ?? true,
+      };
 
-    // Add split transactions if they are given
-    const updatedSubtransactions =
-      finalTransaction.subtransactions || subtransactions;
-    if (updatedSubtransactions && updatedSubtransactions.length > 0) {
-      added.push(
-        ...makeSplitTransaction(finalTransaction, updatedSubtransactions),
-      );
-    } else {
-      added.push(finalTransaction);
+      const updatedSubtransactions =
+        finalTransaction.subtransactions || subtransactions;
+      if (updatedSubtransactions && updatedSubtransactions.length > 0) {
+        allAddedTransactions.push(
+          ...makeSplitTransaction(finalTransaction, updatedSubtransactions),
+        );
+      } else {
+        allAddedTransactions.push(finalTransaction);
+      }
+    }
+  } else {
+    // 'All Accounts' import
+    for (const transaction of transactions) {
+      let determinedAccountId = transaction.account as string | undefined; // Ensure it can be reassigned
+
+      // Attempt to determine account if not set or invalid
+      if (!determinedAccountId || !accountsMap.has(determinedAccountId)) {
+        if (transaction.extractedAccountNumber) {
+          const newOrFoundAccountId = await findOrCreateAccountByDetails(
+            transaction.extractedAccountNumber,
+            transaction.extractedBankId,
+            transaction.extractedAccountType,
+            Array.from(accountsMap.values()), // Pass current list of accounts
+          );
+
+          if (newOrFoundAccountId) {
+            determinedAccountId = newOrFoundAccountId;
+            transaction.account = newOrFoundAccountId; // Assign back
+
+            // If a new account was created, add it to accountsMap for subsequent iterations
+            if (!accountsMap.has(newOrFoundAccountId)) {
+              const newAccount = await db.getAccount(newOrFoundAccountId);
+              if (newAccount) {
+                accountsMap.set(newOrFoundAccountId, newAccount);
+                console.log(`addTransactions: Added new account ${newAccount.name} (ID: ${newOrFoundAccountId}) to working accountsMap.`);
+              } else {
+                 console.error(`addTransactions: Failed to fetch newly created account ${newOrFoundAccountId}.`);
+              }
+            }
+          } else {
+            console.warn(
+              `Skipping transaction in addTransactions as account could not be determined/created for accNumber: ${transaction.extractedAccountNumber}`,
+               transaction.id || transaction.description || transaction.payee_name,
+            );
+            continue;
+          }
+        } else {
+          console.warn(
+            'Skipping transaction in addTransactions as account is not set and no extracted number found.',
+             transaction.id || transaction.description || transaction.payee_name,
+          );
+          continue;
+        }
+      }
+      
+      // Ensure determinedAccountId is valid before proceeding to normalize & process
+      if (typeof determinedAccountId !== 'string' || !determinedAccountId.trim() || !accountsMap.has(determinedAccountId) ) {
+        console.warn(
+          `Skipping transaction in addTransactions due to invalid or still undetermined account ID after find/create attempt: ${determinedAccountId}`,
+           transaction.id || transaction.description || transaction.payee_name,
+        );
+        continue;
+      }
+
+
+      const { normalized: normalizedSingle, payeesToCreate: singlePayeesToCreate } =
+        await normalizeTransactions([transaction], determinedAccountId, {
+          rawPayeeName: true,
+        });
+
+      // Merge payees
+      for (const [key, value] of singlePayeesToCreate.entries()) {
+        if (!allPayeesToCreate.has(key)) {
+          allPayeesToCreate.set(key, value);
+        }
+      }
+
+      if (normalizedSingle.length > 0) {
+        const { trans: originalTrans, subtransactions } = normalizedSingle[0];
+        let ruledTransaction = await runRules(originalTrans, accountsMap);
+
+        ruledTransaction.id = ruledTransaction.id || uuidv4();
+        ruledTransaction.account = determinedAccountId;
+        ruledTransaction.cleared = ruledTransaction.cleared ?? true;
+
+        const updatedSubtransactions =
+          ruledTransaction.subtransactions || subtransactions;
+        if (updatedSubtransactions && updatedSubtransactions.length > 0) {
+          // Ensure subtransactions also get the correct accountId
+          const finalSubtransactions = updatedSubtransactions.map(sub => ({
+            ...sub,
+            account: determinedAccountId,
+          }));
+          allAddedTransactions.push(
+            ...makeSplitTransaction(ruledTransaction, finalSubtransactions),
+          );
+        } else {
+          allAddedTransactions.push(ruledTransaction);
+        }
+      }
     }
   }
 
-  await createNewPayees(payeesToCreate, added);
+  if (allAddedTransactions.length > 0) {
+    await createNewPayees(allPayeesToCreate, allAddedTransactions);
+  }
 
-  let newTransactions;
+  let newTransactionIds;
   if (runTransfers || learnCategories) {
     const res = await batchUpdateTransactions({
-      added,
+      added: allAddedTransactions,
       learnCategories,
       runTransfers,
     });
-    newTransactions = res.added.map(t => t.id);
+    newTransactionIds = res.added.map(t => t.id);
   } else {
     await batchMessages(async () => {
-      newTransactions = await Promise.all(
-        added.map(async trans => db.insertTransaction(trans)),
+      newTransactionIds = await Promise.all(
+        allAddedTransactions.map(async trans => db.insertTransaction(trans)),
       );
     });
   }
-  return newTransactions;
+  return newTransactionIds;
 }
 
 async function processBankSyncDownload(

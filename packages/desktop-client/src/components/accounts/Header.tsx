@@ -326,7 +326,7 @@ export function AccountHeader({
             </Button>
           )}
 
-          {account && !account.closed && (
+          {(!account || (account && !account.closed)) && (
             <Button variant="bare" onPress={onImport}>
               <SvgDownloadThickBottom
                 width={13}

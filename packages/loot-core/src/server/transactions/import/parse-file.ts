@@ -96,9 +96,9 @@ async function parseQIF(
   const errors = Array<ParseError>();
   const contents = await fs.readFile(filepath);
 
-  let data;
+  let qifData;
   try {
-    data = qif2json(contents);
+    qifData = qif2json(contents);
   } catch (err) {
     errors.push({
       message: 'Failed parsing: doesn’t look like a valid QIF file.',
@@ -109,13 +109,15 @@ async function parseQIF(
 
   return {
     errors: [],
-    transactions: data.transactions
+    transactions: qifData.transactions
       .map(trans => ({
         amount: trans.amount != null ? looselyParseAmount(trans.amount) : null,
         date: trans.date,
         payee_name: trans.payee,
         imported_payee: trans.payee,
         notes: options.importNotes ? trans.memo || null : null,
+        // Add the extracted account name if available
+        extractedAccountName: qifData.accountName || undefined,
       }))
       .filter(trans => trans.date != null && trans.amount != null),
   };
@@ -128,9 +130,9 @@ async function parseOFX(
   const errors = Array<ParseError>();
   const contents = await fs.readFile(filepath);
 
-  let data;
+  let ofxResult;
   try {
-    data = await ofx2json(contents);
+    ofxResult = await ofx2json(contents);
   } catch (err) {
     errors.push({
       message: 'Failed importing file',
@@ -145,7 +147,7 @@ async function parseOFX(
 
   return {
     errors,
-    transactions: data.transactions.map(trans => {
+    transactions: ofxResult.transactions.map(trans => {
       return {
         amount: trans.amount,
         imported_id: trans.fitId,
@@ -153,6 +155,10 @@ async function parseOFX(
         payee_name: trans.name || (useMemoFallback ? trans.memo : null),
         imported_payee: trans.name || (useMemoFallback ? trans.memo : null),
         notes: options.importNotes ? trans.memo || null : null, //memo used for payee
+        // Add the new extracted fields
+        extractedAccountNumber: ofxResult.accountNumber,
+        extractedBankId: ofxResult.bankId,
+        extractedAccountType: ofxResult.accountType,
       };
     }),
   };

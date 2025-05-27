@@ -45,7 +45,8 @@ import {
   importPreviewTransactions,
   importTransactions,
 } from '@desktop-client/queries/queriesSlice';
-import { useDispatch } from '@desktop-client/redux';
+import { useDispatch, useSelector } from '@desktop-client/redux';
+import {เงิน} from '@actual-app/icons/v1'; // Using a placeholder for currency icon, replace if a better one exists
 
 function getFileType(filepath) {
   const m = filepath.match(/\.([^.]*)$/);
@@ -158,6 +159,7 @@ export function ImportTransactionsModal({
   const [prefs, savePrefs] = useSyncedPrefs();
   const dispatch = useDispatch();
   const categories = useCategories();
+  const allAccounts = useSelector(state => state.queries.accounts); // Fetch all accounts
 
   const [multiplierAmount, setMultiplierAmount] = useState('');
   const [loadingState, setLoadingState] = useState('parsing');
@@ -177,29 +179,32 @@ export function ImportTransactionsModal({
   // options which are simple post-processing. That means if you
   // parsed different files without closing the modal, it wouldn't
   // re-read this.
+  const accountPrefsKey = accountId || 'all';
   const [delimiter, setDelimiter] = useState(
-    prefs[`csv-delimiter-${accountId}`] ||
+    prefs[`csv-delimiter-${accountPrefsKey}`] ||
       (filename.endsWith('.tsv') ? '\t' : ','),
   );
   const [skipLines, setSkipLines] = useState(
-    parseInt(prefs[`csv-skip-lines-${accountId}`], 10) || 0,
+    parseInt(prefs[`csv-skip-lines-${accountPrefsKey}`], 10) || 0,
   );
   const [inOutMode, setInOutMode] = useState(
-    String(prefs[`csv-in-out-mode-${accountId}`]) === 'true',
+    String(prefs[`csv-in-out-mode-${accountPrefsKey}`]) === 'true',
   );
   const [outValue, setOutValue] = useState(
-    prefs[`csv-out-value-${accountId}`] ?? '',
+    prefs[`csv-out-value-${accountPrefsKey}`] ?? '',
   );
   const [hasHeaderRow, setHasHeaderRow] = useState(
-    String(prefs[`csv-has-header-${accountId}`]) !== 'false',
+    String(prefs[`csv-has-header-${accountPrefsKey}`]) !== 'false',
   );
   const [fallbackMissingPayeeToMemo, setFallbackMissingPayeeToMemo] = useState(
-    String(prefs[`ofx-fallback-missing-payee-${accountId}`]) !== 'false',
+    String(prefs[`ofx-fallback-missing-payee-${accountPrefsKey}`]) !== 'false',
   );
 
   const [parseDateFormat, setParseDateFormat] = useState(null);
 
   const [clearOnImport, setClearOnImport] = useState(true);
+  const [conflicts, setConflicts] = useState(new Map());
+  const [isResolvingConflicts, setIsResolvingConflicts] = useState(false);
 
   const getImportPreview = useCallback(
     async (
@@ -372,12 +377,13 @@ export function ImportTransactionsModal({
 
         if (filetype === 'csv' || filetype === 'qif') {
           flipAmount =
-            String(prefs[`flip-amount-${accountId}-${filetype}`]) === 'true';
+            String(prefs[`flip-amount-${accountPrefsKey}-${filetype}`]) ===
+            'true';
           setFlipAmount(flipAmount);
         }
 
         if (filetype === 'csv') {
-          let mappings = prefs[`csv-mappings-${accountId}`];
+          let mappings = prefs[`csv-mappings-${accountPrefsKey}`];
           mappings = mappings
             ? JSON.parse(mappings)
             : getInitialMappings(transactions);
@@ -390,12 +396,12 @@ export function ImportTransactionsModal({
           setSplitMode(splitMode);
 
           parseDateFormat =
-            prefs[`parse-date-${accountId}-${filetype}`] ||
+            prefs[`parse-date-${accountPrefsKey}-${filetype}`] ||
             getInitialDateFormat(transactions, mappings);
           setParseDateFormat(parseDateFormat);
         } else if (filetype === 'qif') {
           parseDateFormat =
-            prefs[`parse-date-${accountId}-${filetype}`] ||
+            prefs[`parse-date-${accountPrefsKey}-${filetype}`] ||
             getInitialDateFormat(transactions, { date: 'date' });
           setParseDateFormat(parseDateFormat);
         } else {
@@ -418,12 +424,98 @@ export function ImportTransactionsModal({
           multiplierAmount,
         );
         setTransactions(transactionPreview);
+
+        // Conflict detection for 'All Accounts'
+        if (accountId == null && transactionPreview.length > 0) {
+          let newConflicts = new Map();
+          let foundConflicts = false;
+
+          for (const trans of transactionPreview) {
+            // Only check transactions that don't have an account pre-assigned
+            // and are selected for import.
+            if (!trans.account && trans.selected && !trans.isMatchedTransaction) {
+              const { potentialAccountIds } = await send(
+                'transactions-find-potential-accounts',
+                {
+                  payeeName: trans.payee_name, // Assuming payee_name is the relevant field
+                  importedPayee: trans.imported_payee,
+                  extractedAccountNumber: trans.extractedAccountNumber,
+                  // Consider adding amount and date if the backend handler uses them
+                },
+              );
+
+              if (potentialAccountIds && potentialAccountIds.length > 1) {
+                const potentialAccounts = allAccounts.list.filter(acc =>
+                  potentialAccountIds.includes(acc.id),
+                );
+                if (potentialAccounts.length > 1) {
+                  newConflicts.set(trans.trx_id, {
+                    transaction: trans,
+                    potentialAccounts,
+                    resolvedAccountId: null,
+                  });
+                  foundConflicts = true;
+                }
+              } else if (potentialAccountIds && potentialAccountIds.length === 1) {
+                // Auto-assign if only one potential account is found
+                // This might be better done after explicit resolution if any other conflicts exist
+                // For now, let's assume we only set conflicts for >1
+              }
+            }
+          }
+
+          if (foundConflicts) {
+            setConflicts(newConflicts);
+            setIsResolvingConflicts(true);
+          } else {
+            setIsResolvingConflicts(false); // Ensure it's reset if no conflicts found
+            setConflicts(new Map()); // Clear any old conflicts
+          }
+        }
       }
     },
-    // We use some state variables from the component, but do not want to re-parse when they change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [accountId, getImportPreview, prefs],
+    [accountId, getImportPreview, prefs, allAccounts.list], // Added allAccounts.list
   );
+  
+  const handleConflictResolution = (trxId, resolvedAccountId) => {
+    setConflicts(prevConflicts => {
+      const newConflicts = new Map(prevConflicts);
+      const conflict = newConflicts.get(trxId);
+      if (conflict) {
+        newConflicts.set(trxId, { ...conflict, resolvedAccountId });
+      }
+      return newConflicts;
+    });
+  };
+
+  const confirmConflictResolutions = () => {
+    let updatedTransactions = [...transactions];
+    let allResolved = true;
+
+    conflicts.forEach((conflict, trxId) => {
+      if (conflict.resolvedAccountId) {
+        updatedTransactions = updatedTransactions.map(t =>
+          t.trx_id === trxId
+            ? { ...t, account: conflict.resolvedAccountId }
+            : t,
+        );
+      } else {
+        allResolved = false; // Should not happen if button is correctly disabled
+      }
+    });
+    
+    if(allResolved) {
+      setTransactions(updatedTransactions);
+      setIsResolvingConflicts(false);
+      setConflicts(new Map());
+      // After resolutions, it's good to run the import preview again
+      // to reflect any changes in matching due to account assignment.
+      // However, runImportPreview itself doesn't take new transactions as param.
+      // For now, we assume the main import process will use the updated transactions.
+    }
+  };
+
 
   function onMultiplierChange(e) {
     const amt = e;
@@ -637,14 +729,16 @@ export function ImportTransactionsModal({
       return;
     }
 
+    const accountPrefsKey = accountId || 'all';
+
     if (!isOfxFile(filetype) && !isCamtFile(filetype)) {
-      const key = `parse-date-${accountId}-${filetype}`;
+      const key = `parse-date-${accountPrefsKey}-${filetype}`;
       savePrefs({ [key]: parseDateFormat });
     }
 
     if (isOfxFile(filetype)) {
       savePrefs({
-        [`ofx-fallback-missing-payee-${accountId}`]: String(
+        [`ofx-fallback-missing-payee-${accountPrefsKey}`]: String(
           fallbackMissingPayeeToMemo,
         ),
       });
@@ -652,25 +746,25 @@ export function ImportTransactionsModal({
 
     if (filetype === 'csv') {
       savePrefs({
-        [`csv-mappings-${accountId}`]: JSON.stringify(fieldMappings),
+        [`csv-mappings-${accountPrefsKey}`]: JSON.stringify(fieldMappings),
       });
-      savePrefs({ [`csv-delimiter-${accountId}`]: delimiter });
-      savePrefs({ [`csv-has-header-${accountId}`]: String(hasHeaderRow) });
-      savePrefs({ [`csv-skip-lines-${accountId}`]: String(skipLines) });
-      savePrefs({ [`csv-in-out-mode-${accountId}`]: String(inOutMode) });
-      savePrefs({ [`csv-out-value-${accountId}`]: String(outValue) });
+      savePrefs({ [`csv-delimiter-${accountPrefsKey}`]: delimiter });
+      savePrefs({ [`csv-has-header-${accountPrefsKey}`]: String(hasHeaderRow) });
+      savePrefs({ [`csv-skip-lines-${accountPrefsKey}`]: String(skipLines) });
+      savePrefs({ [`csv-in-out-mode-${accountPrefsKey}`]: String(inOutMode) });
+      savePrefs({ [`csv-out-value-${accountPrefsKey}`]: String(outValue) });
     }
 
     if (filetype === 'csv' || filetype === 'qif') {
       savePrefs({
-        [`flip-amount-${accountId}-${filetype}`]: String(flipAmount),
-        [`import-notes-${accountId}-${filetype}`]: String(importNotes),
+        [`flip-amount-${accountPrefsKey}-${filetype}`]: String(flipAmount),
+        [`import-notes-${accountPrefsKey}-${filetype}`]: String(importNotes),
       });
     }
 
     const didChange = await dispatch(
       importTransactions({
-        accountId,
+        accountId, // accountId can be null here for 'All Accounts'
         transactions: finalTransactions,
         reconcile,
       }),
@@ -1077,36 +1171,87 @@ export function ImportTransactionsModal({
 
           <View style={{ flexDirection: 'row', marginTop: 5 }}>
             {/*Submit Button */}
-            <View
-              style={{
-                alignSelf: 'flex-end',
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: '1em',
-              }}
-            >
-              <ButtonWithLoading
-                variant="primary"
-                autoFocus
-                isDisabled={
-                  transactions?.filter(
-                    trans => !trans.isMatchedTransaction && trans.selected,
-                  ).length === 0
-                }
-                isLoading={loadingState === 'importing'}
-                onPress={() => {
-                  onImport(close);
+            {isResolvingConflicts && (
+              <View style={{ marginTop: 20, padding: 15, backgroundColor: theme.altPageBackground, borderRadius: 4 }}>
+                <Text style={{ fontSize: 16, fontWeight: '600', marginBottom: 10 }}>
+                  {t('Resolve Transaction Conflicts')}
+                </Text>
+                <Text style={{ marginBottom: 15 }}>
+                  {t('Some transactions could belong to multiple accounts. Please choose the correct account for each.')}
+                </Text>
+                {Array.from(conflicts.values()).map(conflict => (
+                  <View key={conflict.transaction.trx_id} style={{ marginBottom: 15, paddingBottom: 10, borderBottom: `1px solid ${theme.altTableBorder}` }}>
+                    <Stack direction="row" justify="space-between" align="center">
+                      <Text>
+                        {conflict.transaction.date} - {conflict.transaction.payee_name || t('Unknown Payee')}
+                      </Text>
+                      <Text style={{ color: conflict.transaction.amount > 0 ? theme.noticeText : theme.errorText }}>
+                        {/* Assuming amountToInteger was already applied or formatMoney is available */}
+                        {/* For display, you might want a formatMoney utility */}
+                        {new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(conflict.transaction.amount / 100)}
+                      </Text>
+                    </Stack>
+                    <Select
+                      placeholder={t('Select account...')}
+                      value={conflict.resolvedAccountId}
+                      options={conflict.potentialAccounts.map(acc => ({
+                        value: acc.id,
+                        label: acc.name,
+                      }))}
+                      onChange={value =>
+                        handleConflictResolution(conflict.transaction.trx_id, value)
+                      }
+                      style={{ marginTop: 5 }}
+                    />
+                  </View>
+                ))}
+                <Button
+                  variant="primary"
+                  isDisabled={Array.from(conflicts.values()).some(c => c.resolvedAccountId === null)}
+                  onPress={confirmConflictResolutions}
+                  style={{ alignSelf: 'flex-end' }}
+                >
+                  {t('Confirm Resolutions')}
+                </Button>
+              </View>
+            )}
+
+            {/*Submit Button Area - Conditionally render or hide based on conflict state */}
+            {!isResolvingConflicts && (
+              <View
+                style={{
+                  alignSelf: 'flex-end',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: '1em',
+                  marginTop: 10, // Added margin if conflict UI isn't shown
                 }}
               >
-                Import{' '}
-                {
-                  transactions?.filter(
-                    trans => !trans.isMatchedTransaction && trans.selected,
-                  ).length
-                }{' '}
-                {t('transactions')}
-              </ButtonWithLoading>
-            </View>
+                <ButtonWithLoading
+                  variant="primary"
+                  autoFocus
+                  isDisabled={
+                    isResolvingConflicts || // Added
+                    (conflicts.size > 0 && Array.from(conflicts.values()).some(c => c.resolvedAccountId === null)) || // Added
+                    transactions?.filter(
+                      trans => !trans.isMatchedTransaction && trans.selected,
+                    ).length === 0
+                  }
+                  isLoading={loadingState === 'importing'}
+                  onPress={() => {
+                    onImport(close);
+                  }}
+                >
+                  Import{' '}
+                  {
+                    transactions?.filter(
+                      trans => !trans.isMatchedTransaction && trans.selected,
+                    ).length
+                  }{' '}
+                  {t('transactions')}
+                </ButtonWithLoading>
+              </View>
+            )}
           </View>
         </>
       )}
