@@ -46,7 +46,6 @@ import {
   importTransactions,
 } from '@desktop-client/queries/queriesSlice';
 import { useDispatch, useSelector } from '@desktop-client/redux';
-import {เงิน} from '@actual-app/icons/v1'; // Using a placeholder for currency icon, replace if a better one exists
 
 function getFileType(filepath) {
   const m = filepath.match(/\.([^.]*)$/);
