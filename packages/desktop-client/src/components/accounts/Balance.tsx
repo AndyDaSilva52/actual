@@ -8,7 +8,7 @@ import { theme } from '@actual-app/components/theme';
 import { View } from '@actual-app/components/view';
 import { useHover } from 'usehooks-ts';
 
-import { q, type Query } from 'loot-core/shared/query';
+import { q, type Query, type Filter } from 'loot-core/shared/query';
 import { getScheduledAmount } from 'loot-core/shared/schedules';
 import { isPreviewId } from 'loot-core/shared/transactions';
 import { type AccountEntity } from 'loot-core/types/models';
@@ -22,6 +22,7 @@ import {
 import { useFormat } from '@desktop-client/components/spreadsheet/useFormat';
 import { useSheetValue } from '@desktop-client/components/spreadsheet/useSheetValue';
 import { useCachedSchedules } from '@desktop-client/hooks/useCachedSchedules';
+import { accountBalanceFuture } from '@desktop-client/queries/queries';
 import { useSelectedItems } from '@desktop-client/hooks/useSelected';
 
 type DetailedBalanceProps = {
@@ -166,10 +167,30 @@ function MoreBalances({ balanceQuery }: MoreBalancesProps) {
     query: balanceQuery.query.filter({ cleared: false }),
   });
 
+  let accountId: string | undefined;
+  const accountFilter = balanceQuery.query.getFilters().find(f => f.account);
+  if (accountFilter) {
+    accountId = (accountFilter as Filter<'transactions', 'account'>).account.value as string;
+  } else {
+    // Fallback if account id is not in the filter for some reason (e.g. 'all accounts')
+    // This may not be needed if MoreBalances is only shown for single accounts.
+    const match = balanceQuery.name.match(/^balance-query-(.*)$/);
+    if (match) {
+      accountId = match[1];
+    }
+  }
+
+  const futureBalance = useSheetValue(
+    accountId ? accountBalanceFuture(accountId) : undefined,
+  );
+
   return (
     <View style={{ flexDirection: 'row' }}>
       <DetailedBalance name={t('Cleared total:')} balance={cleared ?? 0} />
       <DetailedBalance name={t('Uncleared total:')} balance={uncleared ?? 0} />
+      {accountId && typeof futureBalance === 'number' && (
+        <DetailedBalance name={t('Future total:')} balance={futureBalance} />
+      )}
     </View>
   );
 }

@@ -2,6 +2,7 @@
 import { parse as parseDate, isValid as isDateValid } from 'date-fns';
 
 import {
+  currentDayISO,
   dayFromDate,
   getDayMonthRegex,
   getDayMonthFormat,
@@ -142,7 +143,7 @@ export function accountBalance(accountId: AccountEntity['id']) {
   return {
     name: accountParametrizedField('balance')(accountId),
     query: q('transactions')
-      .filter({ account: accountId })
+      .filter({ account: accountId, date: { $lte: currentDayISO() } })
       .options({ splits: 'none' })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'balance'>;
@@ -152,7 +153,7 @@ export function accountBalanceCleared(accountId: AccountEntity['id']) {
   return {
     name: accountParametrizedField('balanceCleared')(accountId),
     query: q('transactions')
-      .filter({ account: accountId, cleared: true })
+      .filter({ account: accountId, cleared: true, date: { $lte: currentDayISO() } })
       .options({ splits: 'none' })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'balanceCleared'>;
@@ -162,16 +163,26 @@ export function accountBalanceUncleared(accountId: AccountEntity['id']) {
   return {
     name: accountParametrizedField('balanceUncleared')(accountId),
     query: q('transactions')
-      .filter({ account: accountId, cleared: false })
+      .filter({ account: accountId, cleared: false, date: { $lte: currentDayISO() } })
       .options({ splits: 'none' })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'balanceUncleared'>;
 }
 
+export function accountBalanceFuture(accountId: AccountEntity['id']) {
+  return {
+    name: accountParametrizedField('balanceFuture')(accountId),
+    query: q('transactions')
+      .filter({ account: accountId, date: { $gt: currentDayISO() } })
+      .options({ splits: 'none' })
+      .calculate({ $sum: '$amount' }),
+  } satisfies Binding<'account', 'balanceFuture'>;
+}
+
 export function allAccountBalance() {
   return {
     query: q('transactions')
-      .filter({ 'account.closed': false })
+      .filter({ 'account.closed': false, date: { $lte: currentDayISO() } })
       .calculate({ $sum: '$amount' }),
     name: 'accounts-balance',
   } satisfies Binding<'account', 'accounts-balance'>;
@@ -181,7 +192,7 @@ export function onBudgetAccountBalance() {
   return {
     name: `onbudget-accounts-balance`,
     query: q('transactions')
-      .filter({ 'account.offbudget': false, 'account.closed': false })
+      .filter({ 'account.offbudget': false, 'account.closed': false, date: { $lte: currentDayISO() } })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'onbudget-accounts-balance'>;
 }
@@ -190,7 +201,7 @@ export function offBudgetAccountBalance() {
   return {
     name: `offbudget-accounts-balance`,
     query: q('transactions')
-      .filter({ 'account.offbudget': true, 'account.closed': false })
+      .filter({ 'account.offbudget': true, 'account.closed': false, date: { $lte: currentDayISO() } })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'offbudget-accounts-balance'>;
 }

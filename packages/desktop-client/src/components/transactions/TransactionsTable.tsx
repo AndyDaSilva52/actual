@@ -44,6 +44,7 @@ import { css } from '@emotion/css';
 import { format as formatDate, parseISO } from 'date-fns';
 
 import * as monthUtils from 'loot-core/shared/months';
+import { currentDayISO } from 'loot-core/shared/months';
 import {
   addSplitTransaction,
   deleteTransaction,
@@ -1246,9 +1247,28 @@ const Transaction = memo(function Transaction({
           exposed={focusedField === 'date'}
           value={date}
           valueStyle={valueStyle}
-          formatter={date =>
-            date ? formatDate(parseISO(date), dateFormat) : ''
-          }
+          formatter={isoDate => {
+            const formattedDate = isoDate
+              ? formatDate(parseISO(isoDate), dateFormat)
+              : '';
+            const isFuture =
+              isoDate && isoDate > currentDayISO() && !isPreviewId(id);
+            return (
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                {isFuture && (
+                  <SvgCalendar3
+                    style={{
+                      width: 12,
+                      height: 12,
+                      marginRight: 4,
+                      color: theme.pageTextSubdued,
+                    }}
+                  />
+                )}
+                {formattedDate}
+              </View>
+            );
+          }}
           onExpose={name => !isPreview && onEdit(id, name)}
           onUpdate={value => {
             onUpdate('date', value);
