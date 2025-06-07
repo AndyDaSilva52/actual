@@ -138,13 +138,15 @@ function AllTransactions({
 
   transactions ??= [];
 
+  // Compute running balance, excluding future-dated transactions for summary
   let runningBalance = useMemo(() => {
     if (!showBalances) {
       return 0;
     }
-
+    // Only include transactions up to today for the summary balance
+    const today = currentDay();
     return balances && transactions?.length > 0
-      ? (balances[transactions[0].id]?.balance ?? 0)
+      ? (balances[transactions.find(t => t.date <= today)?.id ?? transactions[0].id]?.balance ?? 0)
       : 0;
   }, [showBalances, balances, transactions]);
 
@@ -230,6 +232,8 @@ type AccountInternalProps = {
   setShowCleared: (newValue: boolean) => void;
   showReconciled: boolean;
   setShowReconciled: (newValue: boolean) => void;
+  showFutured: boolean;
+  setShowFutured: (newValue: boolean) => void;
   showExtraBalances?: boolean;
   setShowExtraBalances: (newValue: boolean) => void;
   modalShowing?: boolean;
@@ -277,6 +281,7 @@ type AccountInternalState = {
   showCleared?: boolean | undefined;
   prevShowCleared?: boolean | undefined;
   showReconciled: boolean;
+  showFutured: boolean;
   nameError: string;
   isAdding: boolean;
   modalShowing?: boolean;
@@ -327,6 +332,7 @@ class AccountInternal extends PureComponent<
       balances: null,
       showCleared: props.showCleared,
       showReconciled: props.showReconciled,
+      showFutured: props.showFutured,
       nameError: '',
       isAdding: false,
       sort: null,
@@ -420,7 +426,7 @@ class AccountInternal extends PureComponent<
       }, 100);
     }
 
-    //Resest sort/filter/search on account change
+    //Reset sort/filter/search on account change
     if (this.props.accountId !== prevProps.accountId) {
       this.setState({ sort: null, search: '', filterConditions: [] });
     }
@@ -677,13 +683,28 @@ class AccountInternal extends PureComponent<
       return null;
     }
 
+    // Only sum transactions up to today for the main balance
+    const today = currentDay();
     const { data } = await aqlQuery(
       this.paged.query
+        .filter({ date: { $lte: today } })
         .options({ splits: 'none' })
         .select([{ balance: { $sumOver: '$amount' } }]),
     );
 
     return groupById<{ id: string; balance: number }>(data);
+  }
+
+  // Add method to calculate future total
+  async calculateFutureTotal() {
+    if (!this.paged) return 0;
+    const today = currentDay();
+    const { data } = await aqlQuery(
+      this.paged.query
+        .filter({ date: { $gt: today } })
+        .calculate({ $sum: '$amount' }),
+    );
+    return data ?? 0;
   }
 
   onRunRules = async (ids: string[]) => {
@@ -1687,6 +1708,7 @@ class AccountInternal extends PureComponent<
       balances,
       showCleared,
       showReconciled,
+      showFutured,
       filteredAmount,
     } = this.state;
 
@@ -1712,6 +1734,12 @@ class AccountInternal extends PureComponent<
       : false;
 
     const balanceQuery = this.getBalanceQuery(accountId);
+
+    // Compute future total for this account
+    //const [futureTotal, setFutureTotal] = React.useState(0);
+    //React.useEffect(() => {
+    //  this.calculateFutureTotal().then(setFutureTotal);
+    //}, [this.state.transactions]);
 
     return (
       <AllTransactions
@@ -1746,6 +1774,7 @@ class AccountInternal extends PureComponent<
                 showExtraBalances={showExtraBalances ?? false}
                 showCleared={showCleared ?? false}
                 showReconciled={showReconciled ?? false}
+                showFutured={showFutured ?? false}
                 showEmptyMessage={showEmptyMessage ?? false}
                 balanceQuery={balanceQuery}
                 canCalculateBalance={this?.canCalculateBalance ?? undefined}
@@ -1865,6 +1894,7 @@ class AccountInternal extends PureComponent<
                   }
                   onCreatePayee={this.onCreatePayee}
                   onApplyFilter={this.onApplyFilter}
+                  showFutureIndicator={true}
                 />
               </View>
             </View>
@@ -1973,6 +2003,8 @@ export function Account() {
           setShowCleared={val => setHideCleared(String(!val))}
           showReconciled={String(hideReconciled) !== 'true'}
           setShowReconciled={val => setHideReconciled(String(!val))}
+          showFutured={String(hideReconciled) !== 'true'}
+          setShowFutured={val => setHideReconciled(String(!val))}
           showExtraBalances={String(showExtraBalances) === 'true'}
           setShowExtraBalances={extraBalances =>
             setShowExtraBalances(String(extraBalances))
