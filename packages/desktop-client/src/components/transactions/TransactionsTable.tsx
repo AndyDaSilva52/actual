@@ -2534,10 +2534,10 @@ export const TransactionTable = forwardRef(
       return getFields(item, fields);
     }
 
-    function getFields(item: TransactionEntity | undefined, fields: string[]) {
+    function getFields(item?: TransactionEntity, fields?: string[]) {
       fields = item?.is_child
         ? ['select', 'payee', 'notes', 'category', 'debit', 'credit']
-        : fields.filter(
+        : fields?.filter(
             f =>
               (props.showAccount || f !== 'account') &&
               (props.showCategory || f !== 'category'),
@@ -2549,7 +2549,7 @@ export const TransactionTable = forwardRef(
       if (item?.id && isTemporaryId(item.id)) {
         // You can't focus the select/delete button of temporary
         // transactions
-        fields = fields.slice(1);
+        fields = fields?.slice(1);
       }
 
       return fields;

@@ -160,6 +160,14 @@ export function currentDay(): string {
   }
 }
 
+export function currentDayISO(): string {
+  if (global.IS_TESTING || Platform.isPlaywright) {
+    return '2017-01-01';
+  } else {
+    return d.format(new Date(), 'yyyy-MM-dd');
+  }
+}
+
 export function nextMonth(month: DateLike): string {
   return d.format(d.addMonths(_parse(month), 1), 'yyyy-MM');
 }

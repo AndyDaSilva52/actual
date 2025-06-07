@@ -1,5 +1,6 @@
 // @ts-strict-ignore
 import { parse as parseDate, isValid as isDateValid } from 'date-fns';
+import { format } from 'date-fns';
 
 import {
   currentDayISO,
@@ -139,6 +140,10 @@ export function transactionsSearch(
   });
 }
 
+function todayISO() {
+  return format(new Date(), 'yyyy-MM-dd');
+}
+
 export function accountBalance(accountId: AccountEntity['id']) {
   return {
     name: accountParametrizedField('balance')(accountId),
@@ -210,7 +215,7 @@ export function closedAccountBalance() {
   return {
     name: `closed-accounts-balance`,
     query: q('transactions')
-      .filter({ 'account.closed': true })
+      .filter({ 'account.closed': true, date: { $lte: todayISO() } })
       .calculate({ $sum: '$amount' }),
   } satisfies Binding<'account', 'closed-accounts-balance'>;
 }

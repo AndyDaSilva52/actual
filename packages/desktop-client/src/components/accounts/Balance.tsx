@@ -166,6 +166,15 @@ function MoreBalances({ balanceQuery }: MoreBalancesProps) {
       '-uncleared') as `balance-query-${string}-uncleared`,
     query: balanceQuery.query.filter({ cleared: false }),
   });
+  const today = new Date().toISOString().slice(0, 10);
+  const future = useSheetValue<
+    'balance',
+    `balance-query-${string}-future`
+  >({
+    name: (balanceQuery.name +
+      '-future') as `balance-query-${string}-future`,
+    query: balanceQuery.query.filter({ date: { $gt: today } }),
+  });
 
   let accountId: string | undefined;
   const accountFilter = balanceQuery.query.getFilters().find(f => f.account);
@@ -180,17 +189,19 @@ function MoreBalances({ balanceQuery }: MoreBalancesProps) {
     }
   }
 
-  const futureBalance = useSheetValue(
-    accountId ? accountBalanceFuture(accountId) : undefined,
-  );
+  //const futureBalance = useSheetValue(
+  //  accountId ? accountBalanceFuture(accountId) : undefined,
+  //);
+
+  //{accountId && typeof futureBalance === 'number' && (
+      //  <DetailedBalance name={t('Future total:')} balance={futureBalance} />
+      //)}
 
   return (
     <View style={{ flexDirection: 'row' }}>
       <DetailedBalance name={t('Cleared total:')} balance={cleared ?? 0} />
       <DetailedBalance name={t('Uncleared total:')} balance={uncleared ?? 0} />
-      {accountId && typeof futureBalance === 'number' && (
-        <DetailedBalance name={t('Future total:')} balance={futureBalance} />
-      )}
+      <DetailedBalance name={t('Future total:')} balance={future ?? 0} />
     </View>
   );
 }
